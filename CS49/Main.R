@@ -1,0 +1,530 @@
+##################################
+###-------- Packages ----------###
+##################################
+library(plyr)
+library(corrplot)
+library(randomForest)
+library(ggplot2)
+library(gbm)
+library(psych)
+library(caret)
+library(DataExplorer)
+
+##################################
+###------- Import Data --------###
+##################################
+Train_Data <- read.csv("train.csv", stringsAsFactors = F)
+Test_Data  <- read.csv("test.csv", stringsAsFactors = F)
+Test_Data$SalePrice <- NA
+
+Main_DataFrame <- rbind(Train_Data, Test_Data)
+
+rm(Train_Data, Test_Data)
+
+##################################
+###------ Exploring Data ------###
+##################################
+cat("Dataset shape:(", dim(Main_DataFrame),")")
+
+str(Main_DataFrame)
+
+names(Main_DataFrame)
+
+summary(Main_DataFrame)
+
+cat('There are', length(which(sapply(Main_DataFrame, is.numeric))), 'numeric variables, and',
+    length(which(sapply(Main_DataFrame, is.character))), 'categoric variables')
+
+print("Missing or null values column wise")
+NA_Cols <- which(colSums(is.na(Main_DataFrame)) > 0)
+sort(colSums(sapply(Main_DataFrame[NA_Cols], is.na)), decreasing = TRUE)
+cat('There are', length(NA_Cols), 'columns with missing values')
+rm(NA_Cols)
+
+##################################
+###---- Data Visualization ----###
+##################################
+introduce(Main_DataFrame)
+
+plot_intro(Main_DataFrame)
+
+plot_str(Main_DataFrame)
+
+plot_missing(Main_DataFrame, missing_only = TRUE)
+
+plot_scatterplot(Main_DataFrame, by="SalePrice", nrow = 2L, ncol = 2L)
+
+##################################
+###- Analyzing target feature -###
+##################################
+summary(Main_DataFrame$SalePrice)
+
+ggplot(data = Main_DataFrame[!is.na(Main_DataFrame$SalePrice), ], aes(x = SalePrice)) +
+  geom_histogram(fill = "blue", binwidth = 10000) +
+  scale_x_continuous(breaks = seq(0, 800000, by = 100000),
+                     labels = function(x) format(x, scientific = FALSE, big.mark = ","))
+
+qqnorm(Main_DataFrame$SalePrice)
+qqline(Main_DataFrame$SalePrice)
+
+skew(Main_DataFrame$SalePrice)
+
+##################################
+###------- Missing Data -------###
+##################################
+Main_DataFrame <- Main_DataFrame[, !(colnames(Main_DataFrame)
+                                     %in% c("PoolQC","MiscFeature","Alley","Fence", "Utilities"))]
+
+Mode <- function(x) {
+  ux <- unique(x)
+  ux[which.max(tabulate(match(x, ux)))]
+}
+##########################  FireplaceQu  ##########################
+Main_DataFrame$FireplaceQu[is.na(Main_DataFrame$FireplaceQu)] <- 'None'
+Main_DataFrame$FireplaceQu<-as.integer(revalue(Main_DataFrame$FireplaceQu,
+                                               c("Ex" = 5, "Gd" = 4, "TA" = 3, "Fa" = 2,"Po" = 1, "None" = 0)))
+
+##########################  LotFrontage  ##########################
+Main_DataFrame$LotFrontage[which(is.na(Main_DataFrame$LotFrontage))] <- median(Main_DataFrame$LotFrontage,na.rm = T)
+
+##########################  LotShape  ##########################
+Main_DataFrame$LotShape<-as.integer(revalue(Main_DataFrame$LotShape,
+                                            c('IR3'=0, 'IR2'=1, 'IR1'=2, 'Reg'=3)))
+
+##########################  LotConfig   ##########################
+Main_DataFrame$LotConfig <- as.factor(Main_DataFrame$LotConfig)
+Main_DataFrame$LotConfig <- as.integer(Main_DataFrame$LotConfig)
+
+##########################  GarageYrBlt, GarageArea, GarageCars   ##########################
+cols_0 <- c('GarageYrBlt', 'GarageArea', 'GarageCars')
+
+Main_DataFrame[cols_0][is.na(Main_DataFrame[cols_0])] <- 0
+rm(cols_0)
+
+##########################  GarageType, GarageFinish, GarageQual, GarageCond   ##########################
+cols_None <- c('GarageType', 'GarageFinish', 'GarageQual', 'GarageCond')
+
+Main_DataFrame[cols_None][is.na(Main_DataFrame[cols_None])] <- 'None'
+rm(cols_None)
+
+average_saleprice <- aggregate(SalePrice ~ GarageType, data = Main_DataFrame, FUN = mean)
+ggplot(average_saleprice, aes(x = GarageType, y = SalePrice)) +
+  geom_bar(stat = "identity") +
+  xlab("Garage Type") +
+  ylab("Average Sale Price") +
+  ggtitle("Average Sale Price by Garage Type")
+
+Main_DataFrame$GarageType<-as.integer(revalue(Main_DataFrame$GarageType,
+                                              c('None'=0, 'CarPort'=1, 'Detchd'=2,
+                                                '2Types'=3, 'Basment'=4, 'Attchd'=5, 'BuiltIn'=6)))
+
+Main_DataFrame$GarageFinish<-as.integer(revalue(Main_DataFrame$GarageFinish,
+                                            c('None'=0, 'Unf'=1, 'RFn'=2, 'Fin'=3)))
+
+Main_DataFrame$GarageQual<-as.integer(revalue(Main_DataFrame$GarageQual,
+                                               c("Ex" = 5, "Gd" = 4, "TA" = 3, "Fa" = 2,"Po" = 1, "None" = 0)))
+
+Main_DataFrame$GarageCond<-as.integer(revalue(Main_DataFrame$GarageCond,
+                                              c("Ex" = 5, "Gd" = 4, "TA" = 3, "Fa" = 2,"Po" = 1, "None" = 0)))
+
+##########################  Basement Variables   ##########################
+# select rows where the BsmtFinType1 column is not missing but at least one of the other columns related to the basement is missing
+Main_DataFrame[!is.na(Main_DataFrame$BsmtFinType1) & (is.na(Main_DataFrame$BsmtCond)|is.na(Main_DataFrame$BsmtQual)
+                                                      |is.na(Main_DataFrame$BsmtExposure)|
+                                                        is.na(Main_DataFrame$BsmtFinType2)), 
+               c('BsmtQual', 'BsmtCond', 'BsmtExposure', 'BsmtFinType1', 'BsmtFinType2')]
+
+# filling the missing values with the most common value in the column
+Main_DataFrame$BsmtFinType2[333] <- Mode(Main_DataFrame$BsmtFinType2)
+Main_DataFrame$BsmtExposure[c(949, 1488, 2349)] <- Mode(Main_DataFrame$BsmtExposure)
+Main_DataFrame$BsmtCond[c(2041, 2186, 2525)] <- Mode(Main_DataFrame$BsmtCond)
+Main_DataFrame$BsmtQual[c(2218, 2219)] <- Mode(Main_DataFrame$BsmtQual)
+
+Basement_cols_None <- c('BsmtQual', 'BsmtCond', 'BsmtExposure', 'BsmtFinType1', 'BsmtFinType2')
+
+Main_DataFrame[Basement_cols_None][is.na(Main_DataFrame[Basement_cols_None])] <- 'None'
+rm(Basement_cols_None)
+
+Main_DataFrame$BsmtQual<-as.integer(revalue(Main_DataFrame$BsmtQual,
+                                              c("Ex" = 5, "Gd" = 4, "TA" = 3, "Fa" = 2,"Po" = 1, "None" = 0)))
+
+Main_DataFrame$BsmtCond<-as.integer(revalue(Main_DataFrame$BsmtCond,
+                                              c("Ex" = 5, "Gd" = 4, "TA" = 3, "Fa" = 2,"Po" = 1, "None" = 0)))
+
+Main_DataFrame$BsmtExposure<-as.integer(revalue(Main_DataFrame$BsmtExposure,
+                                            c('None'=0, 'No'=1, 'Mn'=2, 'Av'=3, 'Gd'=4)))
+
+Main_DataFrame$BsmtFinType1<-as.integer(revalue(Main_DataFrame$BsmtFinType1,
+                                                c('None'=0, 'Unf'=1, 'LwQ'=2, 'Rec'=3, 'BLQ'=4, 'ALQ'=5, 'GLQ'=6)))
+
+Main_DataFrame$BsmtFinType2<-as.integer(revalue(Main_DataFrame$BsmtFinType2,
+                                                c('None'=0, 'Unf'=1, 'LwQ'=2, 'Rec'=3, 'BLQ'=4, 'ALQ'=5, 'GLQ'=6)))
+
+Main_DataFrame$BsmtFullBath <- ifelse(is.na(Main_DataFrame$BsmtFullBath), 0, Main_DataFrame$BsmtFullBath)
+Main_DataFrame$BsmtHalfBath <- ifelse(is.na(Main_DataFrame$BsmtHalfBath), 0, Main_DataFrame$BsmtHalfBath)
+Main_DataFrame$BsmtFinSF1 <- ifelse(is.na(Main_DataFrame$BsmtFinSF1), 0, Main_DataFrame$BsmtFinSF1)
+Main_DataFrame$BsmtFinSF2 <- ifelse(is.na(Main_DataFrame$BsmtFinSF2), 0, Main_DataFrame$BsmtFinSF2)
+Main_DataFrame$BsmtUnfSF <- ifelse(is.na(Main_DataFrame$BsmtUnfSF), 0, Main_DataFrame$BsmtUnfSF)
+Main_DataFrame$TotalBsmtSF <- ifelse(is.na(Main_DataFrame$TotalBsmtSF), 0, Main_DataFrame$TotalBsmtSF)
+
+##########################  MasVnrType , MasVnrArea  ##########################
+Main_DataFrame$MasVnrType[2611] <- names(sort(-table(Main_DataFrame$MasVnrType)))[2]
+
+Main_DataFrame$MasVnrType[is.na(Main_DataFrame$MasVnrType)] <- 'None'
+
+average_saleprice_2 <- aggregate(SalePrice ~ MasVnrType, data = Main_DataFrame, FUN = mean)
+ggplot(average_saleprice_2, aes(x = MasVnrType, y = SalePrice)) +
+  geom_bar(stat = "identity") +
+  xlab("MasVnr Type") +
+  ylab("Average Sale Price") +
+  ggtitle("Average Sale Price by MasVnr Type")
+rm(average_saleprice, average_saleprice_2)
+
+Main_DataFrame$MasVnrType<-as.integer(revalue(Main_DataFrame$MasVnrType,
+                                                c('None'=0, 'BrkCmn'=0, 'BrkFace'=1, 'Stone'=2)))
+
+Main_DataFrame$MasVnrArea[is.na(Main_DataFrame$MasVnrArea)] <- 0
+
+##########################  MSZoning  ##########################
+Main_DataFrame$MSZoning[is.na(Main_DataFrame$MSZoning)] <- Mode(Main_DataFrame$MSZoning)
+Main_DataFrame$MSZoning <- as.factor(Main_DataFrame$MSZoning)
+
+##########################  Functional  ##########################
+Main_DataFrame$Functional[is.na(Main_DataFrame$Functional)] <- Mode(Main_DataFrame$Functional)
+
+Main_DataFrame$Functional<-as.integer(revalue(Main_DataFrame$Functional,
+                                              c('Sal'=0, 'Sev'=1, 'Maj2'=2, 'Maj1'=3, 'Mod'=4, 'Min2'=5,
+                                                'Min1'=6, 'Typ'=7)))
+
+##########################  Exterior  ##########################
+# replace missing values with the mode
+Main_DataFrame$Exterior1st[is.na(Main_DataFrame$Exterior1st)] <- Mode(Main_DataFrame$Exterior1st)
+Main_DataFrame$Exterior2nd[is.na(Main_DataFrame$Exterior2nd)] <- Mode(Main_DataFrame$Exterior2nd)
+
+Main_DataFrame$Exterior1st <- as.factor(Main_DataFrame$Exterior1st)
+Main_DataFrame$Exterior2nd <- as.factor(Main_DataFrame$Exterior2nd)
+
+Main_DataFrame$ExterQual<-as.integer(revalue(Main_DataFrame$ExterQual,
+                                             c("Ex" = 5, "Gd" = 4, "TA" = 3, "Fa" = 2,"Po" = 1, "None" = 0)))
+
+Main_DataFrame$ExterCond<-as.integer(revalue(Main_DataFrame$ExterCond,
+                                             c("Ex" = 5, "Gd" = 4, "TA" = 3, "Fa" = 2,"Po" = 1)))
+
+##########################  Electrical  ##########################
+Main_DataFrame$Electrical[is.na(Main_DataFrame$Electrical)] <- Mode(Main_DataFrame$Electrical)
+Main_DataFrame$Electrical <- as.factor(Main_DataFrame$Electrical)
+
+##########################  Kitchen Qual  ##########################
+Main_DataFrame$KitchenQual[is.na(Main_DataFrame$KitchenQual)] <- Mode(Main_DataFrame$KitchenQual)
+
+Main_DataFrame$KitchenQual<-as.integer(revalue(Main_DataFrame$KitchenQual,
+                                             c("Ex" = 5, "Gd" = 4, "TA" = 3, "Fa" = 2,"Po" = 1)))
+
+##########################  Sale Type , Sale Condition  ##########################
+Main_DataFrame$SaleType[is.na(Main_DataFrame$SaleType)] <- Mode(Main_DataFrame$SaleType)
+
+Main_DataFrame$SaleType <- as.factor(Main_DataFrame$SaleType)
+Main_DataFrame$SaleCondition <- as.factor(Main_DataFrame$SaleCondition)
+
+##################################
+### ---- Character Data ------ ###
+##################################
+cat('There are', length(names(Main_DataFrame[,sapply(Main_DataFrame, is.character)])), 'column with char values')
+names(Main_DataFrame[,sapply(Main_DataFrame, is.character)])
+############################################################################################################
+############################################################################################################
+
+##########################  Street  ##########################
+Main_DataFrame$Street<-as.integer(revalue(Main_DataFrame$Street, c('Grvl'=0, 'Pave'=1)))
+
+##########################  Paved Drive  ##########################
+Main_DataFrame$PavedDrive<-as.integer(revalue(Main_DataFrame$PavedDrive, c('N'=0, 'P'=1, 'Y'=2)))
+
+##########################  Land Contour , Land Slope  ##########################
+Main_DataFrame$LandContour <- as.factor(Main_DataFrame$LandContour)
+Main_DataFrame$LandSlope<-as.integer(revalue(Main_DataFrame$LandSlope, c('Sev'=0, 'Mod'=1, 'Gtl'=2)))
+
+##########################  Neighborhood , Condition1 , Condition2  ##########################
+Main_DataFrame$Neighborhood <- as.factor(Main_DataFrame$Neighborhood)
+Main_DataFrame$Condition1 <- as.factor(Main_DataFrame$Condition1)
+Main_DataFrame$Condition2 <- as.factor(Main_DataFrame$Condition2)
+
+##########################  Bldg Type , House Style  ##########################
+Main_DataFrame$BldgType <- as.factor(Main_DataFrame$BldgType)
+Main_DataFrame$HouseStyle <- as.factor(Main_DataFrame$HouseStyle)
+
+##########################  Roof  ##########################
+Main_DataFrame$RoofStyle <- as.factor(Main_DataFrame$RoofStyle)
+Main_DataFrame$RoofMatl <- as.factor(Main_DataFrame$RoofMatl)
+
+##########################  Foundation  ##########################
+Main_DataFrame$Foundation <- as.factor(Main_DataFrame$Foundation)
+
+##########################  Heating , Heating QC  ##########################
+Main_DataFrame$Heating <- as.factor(Main_DataFrame$Heating)
+
+Main_DataFrame$HeatingQC<-as.integer(revalue(Main_DataFrame$HeatingQC,
+                                               c("Ex" = 5, "Gd" = 4, "TA" = 3, "Fa" = 2,"Po" = 1)))
+
+##########################  Central Air  ##########################
+Main_DataFrame$CentralAir<-as.integer(revalue(Main_DataFrame$CentralAir, c('N'=0, 'Y'=1)))
+
+##########################  MoSold  ##########################
+Main_DataFrame$MoSold <- as.factor(Main_DataFrame$MoSold)
+
+##########################  MSSubClass  ##########################
+Main_DataFrame$MSSubClass <- as.factor(Main_DataFrame$MSSubClass)
+
+Main_DataFrame$MSSubClass<-revalue(Main_DataFrame$MSSubClass,
+                                   c('20'='1 story 1946+', '30'='1 story 1945-', '40'='1 story unf attic',
+                                     '45'='1,5 story unf', '50'='1,5 story fin', '60'='2 story 1946+',
+                                     '70'='2 story 1945-', '75'='2,5 story all ages', '80'='split/multi level',
+                                     '85'='split foyer', '90'='duplex all style/age', '120'='1 story PUD 1946+',
+                                     '150'='1,5 story PUD all', '160'='2 story PUD 1946+', '180'='PUD multilevel',
+                                     '190'='2 family conversion'))
+
+############################################################################################################
+############################################################################################################
+cat('There are', length(which(sapply(Main_DataFrame, is.numeric))), 'numeric variables, and',
+    length(which(sapply(Main_DataFrame, is.factor))), 'categoric variables')
+
+##################################
+###--- Fixing target feature --###
+##################################
+Main_DataFrame$SalePrice <- log(Main_DataFrame$SalePrice)
+
+skew(Main_DataFrame$SalePrice)
+
+qqnorm(Main_DataFrame$SalePrice)
+qqline(Main_DataFrame$SalePrice)
+
+##################################
+### ------ Correlation ------- ###
+##################################
+Numeric_Data <- which(sapply(Main_DataFrame, is.numeric)) #index vector numeric variables
+
+cat('There are', length(Numeric_Data), 'numeric variables')
+
+All_Num_Data <- Main_DataFrame[, Numeric_Data]
+Corr_Num_Data <- cor(All_Num_Data, use="pairwise.complete.obs")
+
+Data_Sorted <- as.matrix(sort(Corr_Num_Data[,'SalePrice'], decreasing = TRUE))
+
+# Select only high correlations
+High_Corr <- names(which(apply(Data_Sorted, 1, function(x) abs(x) > 0.3)))
+Corr_Table <- Corr_Num_Data[High_Corr, High_Corr]
+
+C <- cor(Corr_Table)
+
+corrplot(C, method="number")
+
+corrplot(C, method="pie")
+
+corrplot(C, method="color")
+
+rm(C, Corr_Num_Data, Corr_Table, Data_Sorted, High_Corr, All_Num_Data, Numeric_Data)
+
+##################################
+### -- Feature Engineering --- ###
+##################################
+Main_DataFrame$Total_Bathrooms <- Main_DataFrame$FullBath + (Main_DataFrame$HalfBath*0.5) +
+                               Main_DataFrame$BsmtFullBath + (Main_DataFrame$BsmtHalfBath*0.5)
+
+Main_DataFrame$Age <- as.numeric(Main_DataFrame$YrSold)-Main_DataFrame$YearRemodAdd
+
+Main_DataFrame$Is_New <- ifelse(Main_DataFrame$YrSold == Main_DataFrame$YearBuilt, 1, 0)
+Main_DataFrame$YrSold <- as.factor(Main_DataFrame$YrSold)
+
+Main_DataFrame$Total_Sq_Feet_ <- Main_DataFrame$GrLivArea + Main_DataFrame$TotalBsmtSF
+
+Main_DataFrame$Total_Home_Quality = Main_DataFrame$OverallQual + Main_DataFrame$OverallCond
+
+Main_DataFrame$Neighborhood_Class[Main_DataFrame$Neighborhood %in% c('StoneBr', 'NridgHt', 'NoRidge')] <- 2
+Main_DataFrame$Neighborhood_Class[!Main_DataFrame$Neighborhood %in% c('MeadowV', 'IDOTRR', 'BrDale',
+                                                             'StoneBr', 'NridgHt', 'NoRidge')] <- 1
+Main_DataFrame$Neighborhood_Class[Main_DataFrame$Neighborhood %in% c('MeadowV', 'IDOTRR', 'BrDale')] <- 0
+
+############################################################################################################
+############################################################################################################
+Drop_Cols <- c('YearRemodAdd', 'GarageYrBlt', 'GarageArea', 'GarageCond', 'TotalBsmtSF',
+               'TotalRmsAbvGrd', 'BsmtFinSF1', 'X1stFlrSF','Fireplaces')
+
+Main_DataFrame <- Main_DataFrame[,!(names(Main_DataFrame) %in% Drop_Cols)]
+rm(Drop_Cols)
+
+############################################################################################################
+############################################################################################################
+Numeric_Vars <- names(which(sapply(Main_DataFrame, is.numeric)))
+
+DF_Numeric <- Main_DataFrame[, names(Main_DataFrame) %in% Numeric_Vars]
+
+DF_Factors <- Main_DataFrame[, !(names(Main_DataFrame) %in% Numeric_Vars)]
+
+cat('There are', length(DF_Numeric), 'numeric variables, and', length(DF_Factors), 'factor variables')
+
+normalize <- function(df) {
+  df_subset <- df[, !(names(df) %in% c("Id", "SalePrice"))]
+  
+  df_norm <- as.data.frame(lapply(df_subset, function(x) {
+    numerator <- x - min(x, na.rm = TRUE)
+    denominator <- max(x, na.rm = TRUE) - min(x, na.rm = TRUE)
+    return(numerator / denominator)
+  }))
+  
+  df_norm <- cbind(df["Id"], df_norm, df["SalePrice"])
+  return(df_norm)
+}
+DFnorm <- normalize(DF_Numeric)
+
+##########  One Hot Encoding  ##########
+DF_Dummies <- as.data.frame(model.matrix(~.-1, DF_Factors))
+
+################## Remove the columns that did not appear in the (TEST) data from the Main_Data_Frame to ############ 
+################## ensure that the model is not trained on features that have no predictive power. ################## 
+Zero_Test_Cols <- which(colSums(DF_Dummies[(nrow(Main_DataFrame[!is.na(Main_DataFrame$SalePrice),]) + 1)
+                                       :nrow(Main_DataFrame),]) == 0)
+colnames(DF_Dummies[Zero_Test_Cols])
+
+DF_Dummies <- DF_Dummies[,-Zero_Test_Cols]
+
+################## Remove the columns that did not appear in the (TRAIN) data from the Main_Data_Frame to ########### 
+################## ensure that the model is not trained on features that have no predictive power. ################## 
+Zero_Train_Cols <- which(colSums(DF_Dummies[1:nrow(Main_DataFrame[!is.na(Main_DataFrame$SalePrice),]),]) == 0)
+colnames(DF_Dummies[Zero_Train_Cols])
+
+DF_Dummies <- DF_Dummies[,-Zero_Train_Cols]
+
+################# Remove columns with very few NON-ZERO values in the Training data  ################## 
+Few_Non_Zero <- which(colSums(DF_Dummies[1:nrow(Main_DataFrame[!is.na(Main_DataFrame$SalePrice),]),]) < 15)
+colnames(DF_Dummies[Few_Non_Zero])
+
+DF_Dummies <- DF_Dummies[,-Few_Non_Zero]
+
+##################################
+###  Prepare data for modeling ###
+##################################
+All <- cbind(DFnorm, DF_Dummies) 
+rm(Numeric_Vars, DF_Factors, DF_Numeric, DF_Dummies, Few_Non_Zero, Zero_Test_Cols, Zero_Train_Cols, DFnorm)
+
+Train_Data <- All[!is.na(Main_DataFrame$SalePrice),]
+Train_Data$Id <- NULL
+
+Test_Data <- All[is.na(Main_DataFrame$SalePrice),]
+Test_Data$SalePrice <- NULL
+
+rm(Main_DataFrame, All)
+
+##################################
+### -------- Modeling -------- ###
+##################################
+RMSE <- function(x,y){
+  a <- sqrt(sum((log(x)-log(y))^2)/length(y))
+  return(a)
+}
+Actul <- exp(Train_Data$SalePrice)
+
+################## Random Forest ##################
+x_cols <- grep("^SalePrice$", colnames(Train_Data), invert = TRUE)
+x <- Train_Data[, x_cols] 
+
+rf_model <- randomForest(x, Train_Data$SalePrice)
+
+rf_pred <- predict(rf_model, Test_Data)
+rf_pred <- exp(rf_pred)
+
+solution_rf <- data.frame(Id = Test_Data$Id, SalePrice = rf_pred)
+
+write.csv(solution_rf, file = 'RF_model.csv', row.names = F)
+
+eval__ <- RMSE(rf_pred, Actul)
+
+cat("Random Forest model Root mean squared error:", eval__, "\n")
+
+#Visualization
+# Plot actual vs predicted values
+plot(Actul, col = "blue", pch = 16, xlab = "Id", ylab = "Sale Price",
+     main = "Actual vs Predicted ")
+points(rf_pred, col = "red", pch = 16)
+legend("topleft", legend = c("Actual", "Predicted"), col = c("blue", "red"), pch = 16)
+
+################## Gradient Boosting ##################
+gbm_model <- gbm(SalePrice ~ ., data = Train_Data, n.trees = 1000, interaction.depth = 4, shrinkage = 0.05, 
+                 n.minobsinnode = 10, cv.folds = 5, n.cores = 4, verbose = FALSE, distribution = 'gaussian')
+
+gbm_pred <- predict(gbm_model, newdata = Test_Data, n.trees = gbm_model$best.trees)
+gbm_pred <- exp(gbm_pred)
+
+solution_gbm <- data.frame(Id = Test_Data$Id, SalePrice = gbm_pred)
+
+write.csv(solution_gbm, file = 'GBM_1_v2.csv', row.names = FALSE)
+
+eval__1 <- RMSE(gbm_pred, Actul)
+
+cat("GBM_1 Root mean squared error:", eval__1, "\n")
+
+#Visualization
+# Plot actual vs predicted values
+plot(Actul, col = "blue", pch = 16, xlab = "Id", ylab = "Sale Price",
+     main = "Actual vs Predicted ")
+points(gbm_pred, col = "red", pch = 16)
+legend("topleft", legend = c("Actual", "Predicted"), col = c("blue", "red"), pch = 16)
+
+################## Gradient Boosting 2 ##################
+gbm_model_2 <- gbm(SalePrice ~ ., data = Train_Data, n.trees = 1500, interaction.depth = 4, shrinkage = 0.07, 
+                 n.minobsinnode = 10, cv.folds = 5, n.cores = 4, verbose = FALSE, distribution = 'gaussian')
+
+gbm_pred_2 <- predict(gbm_model_2, newdata = Test_Data, n.trees = gbm_model$best.trees)
+gbm_pred_2 <- exp(gbm_pred_2)
+
+solution_gbm_2 <- data.frame(Id = Test_Data$Id, SalePrice = gbm_pred_2)
+
+write.csv(solution_gbm_2, file = 'GBM_2_v2.csv', row.names = FALSE)
+
+eval__2 <- RMSE(gbm_pred_2, Actul)
+
+cat("GBM_2 Root mean squared error:", eval__2, "\n")
+
+#Visualization
+# Plot actual vs predicted values
+plot(Actul, col = "blue", pch = 16, xlab = "Id", ylab = "Sale Price",
+     main = "Actual vs Predicted ")
+points(gbm_pred_2, col = "red", pch = 16)
+legend("topleft", legend = c("Actual", "Predicted"), col = c("blue", "red"), pch = 16)
+
+################## Gradient Boosting 3 ##################
+gbm_model_3 <- gbm(SalePrice ~ ., data = Train_Data, n.trees = 2000, interaction.depth = 4, shrinkage = 0.05, 
+                 n.minobsinnode = 10, cv.folds = 5, n.cores = 4, verbose = FALSE, distribution = 'gaussian')
+
+gbm_pred_3 <- predict(gbm_model_3, newdata = Test_Data, n.trees = gbm_model$best.trees)
+gbm_pred_3 <- exp(gbm_pred_3)
+
+solution_gbm_3 <- data.frame(Id = Test_Data$Id, SalePrice = gbm_pred_3)
+
+write.csv(solution_gbm_3, file = 'GBM_3_v2.csv', row.names = FALSE)
+
+eval__3 <- RMSE(gbm_pred_3, Actul)
+
+cat("GBM_3 Root mean squared error:", eval__3, "\n")
+
+#Visualization
+# Plot actual vs predicted values
+plot(Actul, col = "blue", pch = 16, xlab = "Id", ylab = "Sale Price",
+     main = "Actual vs Predicted ")
+points(gbm_pred_3, col = "red", pch = 16)
+legend("topleft", legend = c("Actual", "Predicted"), col = c("blue", "red"), pch = 16)
+
+################## Mean of GBM Models ##################
+solution_MM <- data.frame(Id = Test_Data$Id, SalePrice = (gbm_pred + gbm_pred_2 + gbm_pred_3) / 3)
+
+write.csv(solution_MM, file = 'M_M_GBM_1_2_3_v2.csv', row.names = FALSE)
+
+eval__4 <- RMSE((gbm_pred + gbm_pred_2 + gbm_pred_3) / 3, Actul)
+
+cat("Mean of GBM Models Root mean squared error:", eval__4, "\n")
+
+#Visualization
+# Plot actual vs predicted values
+plot(Actul, col = "blue", pch = 16, xlab = "Id", ylab = "Sale Price",
+     main = "Actual vs Predicted ")
+points((gbm_pred + gbm_pred_2 + gbm_pred_3) / 3, col = "red", pch = 16)
+legend("topleft", legend = c("Actual", "Predicted"), col = c("blue", "red"), pch = 16)
